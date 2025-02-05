@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Meeting Timeline with Immediate Custom Tooltips</title>
+  
+  <!-- Google Font -->
+  <link href="https://fonts.googleapis.com/css?family=Roboto:400,500,700&display=swap" rel="stylesheet">
+  
+  <!-- Load vis-timeline library -->
+  <link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet" type="text/css" />
+  <script src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
+  
+  <!-- Load Tippy.js (and Popper.js) for tooltips -->
+  <link rel="stylesheet" href="https://unpkg.com/tippy.js@6/dist/tippy.css" />
+  <script src="https://unpkg.com/@popperjs/core@2"></script>
+  <script src="https://unpkg.com/tippy.js@6"></script>
+  
+  <script type="text/javascript">
+    /***** DATE-AGNOSTIC SETUP *****/
+    // We use a fixed baseline date (January 1, 2000) so that only the time-of-day matters.
+    const baseline = new Date(2000, 0, 1); // January 1, 2000
+    const dayStart = new Date(2000, 0, 1, 7, 0, 0, 0); // 7:00 AM
+    const dayEnd   = new Date(2000, 0, 1, 19, 0, 0, 0); // 7:00 PM
+
+    // Global meeting data: each meeting is an object { name, start, end, color }.
+    // The start and end properties will now be simple time strings (e.g., "07:30").
+    let meetingData = [];
+
+    // Global variable for editing mode (null when not editing).
+    let editingIndex = null;
+
+    // Global variable to store the vis timeline instance.
+    let timeline = null;
+
+    // This function takes a time string (e.g., "07:30" or "07:30:00") and creates a Date
+    // object using our fixed baseline date.
+    function parseTime(timeStr) {
+      const parts = timeStr.split(':');
+      const hour = parseInt(parts[0], 10);
+      const minute = parseInt(parts[1], 10);
+      const second = parts.length > 2 ? parseInt(parts[2], 10) : 0;
+      return new Date(2000, 0, 1, hour, minute, second);
+    }
+
+    // Initialize once the page is loaded.
+    window.addEventListener('load', initialize);
+
+    function initialize() {
+      drawTimeline();
+      showMeetingList();
+      // Set up Tippy delegation on the timeline container so that tooltips appear immediately.
+      const timelineEl = document.getElementById('timeline');
+      tippy.delegate(timelineEl, {
+        target: '.meeting-item',
+        content(reference) {
+          // Use the title attribute (which we set on each item) as the tooltip content.
+          return reference.getAttribute('title');
+        },
+        delay: 0,
+        duration: [0, 0],
+        animation: 'none',
+        allowHTML: true,
+        theme: 'light-border',
+        trigger: 'mouseenter'
+      });
+    }
+
+    // Helper: Darken a hex color by a given percentage.
+    function darkenColor(hex, percent) {
+      hex = hex.replace(/^#/, '');
+      let num = parseInt(hex, 16);
+      let r = (num >> 16) & 0xff;
+      let g = (num >> 8) & 0xff;
+      let b = num & 0xff;
+      r = Math.max(0, Math.floor(r * (1 - percent)));
+      g = Math.max(0, Math.floor(g * (1 - percent)));
+      b = Math.max(0, Math.floor(b * (1 - percent)));
+      return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('').toUpperCase();
+    }
+
+    // Add a new meeting or update an existing one.
+    function addOrUpdateMeeting() {
+      const nameInput = document.getElementById("meetingName");
+      const startInput = document.getElementById("meetingStart");
+      const endInput = document.getElementById("meetingEnd");
+      const colorInput = document.getElementById("meetingColor");
+
+      const name = nameInput.value.trim();
+      const startValue = startInput.value;
+      const endValue = endInput.value;
+      const colorValue = colorInput.value;
+
+      if (!name || !startValue || !endValue) {
+        alert("Please fill in all fields.");
+        return;
+      }
+
+      if (editingIndex === null) {
+        meetingData.push({
+          name: name,
+          start: startValue, // e.g., "07:30"
+          end: endValue,     // e.g., "08:15"
+          color: colorValue
+        });
+      } else {
+        meetingData[editingIndex] = {
+          name: name,
+          start: startValue,
+          end: endValue,
+          color: colorValue
+        };
+        editingIndex = null;
+      }
+
+      document.getElementById("addBtn").style.display = "block";
+      document.getElementById("updateBtn").style.display = "none";
+      document.getElementById("cancelEditBtn").style.display = "none";
+      
+      clearForm();
+      drawTimeline();
+      showMeetingList();
+    }
+
+    // Clear the form inputs.
+    function clearForm() {
+      document.getElementById("meetingName").value = "";
+      document.getElementById("meetingStart").value = "";
+      document.getElementById("meetingEnd").value = "";
+      document.getElementById("meetingColor").value = "#42A5F5";
+    }
+
+    // Populate the form with data from a meeting for editing.
+    function editMeeting(index) {
+      editingIndex = index;
+      const meeting = meetingData[index];
+      document.getElementById("meetingName").value = meeting.name;
+      document.getElementById("meetingStart").value = meeting.start;
+      document.getElementById("meetingEnd").value = meeting.end;
+      document.getElementById("meetingColor").value = meeting.color;
+      document.getElementById("addBtn").style.display = "none";
+      document.getElementById("updateBtn").style.display = "block";
+      document.getElementById("cancelEditBtn").style.display = "block";
+    }
+
+    // Cancel editing mode.
+    function cancelEdit() {
+      editingIndex = null;
+      clearForm();
+      document.getElementById("addBtn").style.display = "block";
+      document.getElementById("updateBtn").style.display = "none";
+      document.getElementById("cancelEditBtn").style.display = "none";
+    }
+
+    // Delete a meeting.
+    function deleteMeeting(index) {
+      if (confirm("Are you sure you want to delete this meeting?")) {
+        meetingData.splice(index, 1);
+        drawTimeline();
+        showMeetingList();
+      }
+    }
+
+    // Draw (or redraw) the timeline using vis-timeline.
+    function drawTimeline() {
+      // Process meetings: convert time strings to Date objects using parseTime() and filter by our fixed boundaries.
+      let meetings = meetingData.map(m => ({
+        name: m.name,
+        start: parseTime(m.start),
+        end: parseTime(m.end),
+        color: m.color || "#42A5F5"
+      })).filter(m => m.end > dayStart && m.start < dayEnd);
+
+      meetings.sort((a, b) => a.start - b.start);
+
+      let meetingSegments = meetings.map(m => ({
+        name: m.name,
+        start: m.start < dayStart ? new Date(dayStart) : m.start,
+        end: m.end > dayEnd ? new Date(dayEnd) : m.end,
+        color: m.color
+      }));
+
+      // Calculate free time segments.
+      let freeTimeSegments = [];
+      let currentTime = new Date(dayStart);
+      meetingSegments.forEach(seg => {
+        if (seg.start > currentTime) {
+          freeTimeSegments.push({
+            start: new Date(currentTime),
+            end: new Date(seg.start)
+          });
+        }
+        if (seg.end > currentTime) {
+          currentTime = new Date(seg.end);
+        }
+      });
+      if (currentTime < dayEnd) {
+        freeTimeSegments.push({
+          start: new Date(currentTime),
+          end: new Date(dayEnd)
+        });
+      }
+
+      let items = [];
+      let idCounter = 1;
+
+      // Add meeting items with custom tooltip formatting and enhanced styling.
+      meetingSegments.forEach(seg => {
+        const startTimeStr = seg.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const endTimeStr = seg.end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const durationMs = seg.end - seg.start;
+        const durationMinutes = Math.floor(durationMs / 60000);
+        const hours = Math.floor(durationMinutes / 60);
+        const minutes = durationMinutes % 60;
+        const durationStr = (hours > 0 ? hours + " hr " : "") + minutes + " min";
+        const tooltipText = `${seg.name}<br>---------------------<br>${startTimeStr} - ${endTimeStr}<br>${durationStr}`;
+
+        items.push({
+          id: idCounter++,
+          group: 'Meetings',
+          content: seg.name,
+          start: seg.start,
+          end: seg.end,
+          style: `background: linear-gradient(135deg, ${seg.color}, ${darkenColor(seg.color, 0.2)}); color: #fff; padding: 8px; font-size: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.4);`,
+          className: 'meeting-item',
+          title: tooltipText
+        });
+      });
+
+      // Add free time items (with tooltips and the same class for Tippy delegation).
+      freeTimeSegments.forEach(seg => {
+        const freeStart = seg.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const freeEnd = seg.end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const freeTooltip = `Free Time<br>---------------------<br>${freeStart} - ${freeEnd}`;
+        items.push({
+          id: idCounter++,
+          group: 'Free Time',
+          content: "Free Time",
+          start: seg.start,
+          end: seg.end,
+          style: `background: linear-gradient(135deg, #A8D08D, #7ba87b); color: #333; padding: 8px; font-size: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.4);`,
+          className: 'meeting-item',
+          title: freeTooltip
+        });
+      });
+
+      let groups = new vis.DataSet([
+        { id: 'Meetings', content: 'Meetings' },
+        { id: 'Free Time', content: 'Free Time' }
+      ]);
+
+      let options = {
+        start: dayStart,
+        end: dayEnd,
+        min: dayStart,
+        max: dayEnd,
+        stack: true,
+        zoomable: false,
+        // Format the time axis in 12-hour format.
+        format: {
+          minorLabels: {
+            hour: 'h:mm A',
+            minute: 'h:mm A'
+          },
+          majorLabels: {
+            hour: 'h A'
+          }
+        }
+      };
+
+      let container = document.getElementById("timeline");
+      if (timeline) {
+        timeline.setItems(new vis.DataSet(items));
+        timeline.setGroups(groups);
+        timeline.setOptions(options);
+      } else {
+        timeline = new vis.Timeline(container, items, groups, options);
+      }
+    }
+
+    // Display the meeting list in a table.
+    function showMeetingList() {
+      const listDiv = document.getElementById("meetingList");
+      if (meetingData.length === 0) {
+        listDiv.innerHTML = "<p>No meetings scheduled.</p>";
+        return;
+      }
+      let html = "<table><tr><th>#</th><th>Name</th><th>Start</th><th>End</th><th>Actions</th></tr>";
+      meetingData.forEach((m, index) => {
+        // Display only the time portion by using parseTime().
+        const startTime = parseTime(m.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const endTime   = parseTime(m.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        html += `<tr>
+          <td>${index + 1}</td>
+          <td>${m.name}</td>
+          <td>${startTime}</td>
+          <td>${endTime}</td>
+          <td>
+            <button onclick="editMeeting(${index})">Edit</button>
+            <button onclick="deleteMeeting(${index})">Delete</button>
+          </td>
+        </tr>`;
+      });
+      html += "</table>";
+      listDiv.innerHTML = html;
+    }
+
+    // Download meeting data as a JSON file.
+    function downloadData() {
+      const dataStr = JSON.stringify(meetingData, null, 2);
+      const blob = new Blob([dataStr], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "meetingData.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // Handle uploading a JSON file containing meeting data.
+    function uploadData(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          const importedData = JSON.parse(e.target.result);
+          if (Array.isArray(importedData)) {
+            meetingData = importedData;
+            drawTimeline();
+            showMeetingList();
+          } else {
+            alert("Invalid data format.");
+          }
+        } catch (error) {
+          alert("Error parsing file: " + error);
+        }
+      };
+      reader.readAsText(file);
+    }
+  </script>
+  
+  <style>
+    /* Global styles */
+    body {
+      font-family: 'Roboto', sans-serif;
+      background: linear-gradient(135deg, #000428, #004e92);
+      margin: 0;
+      padding: 0;
+      color: #eee;
+    }
+    .container {
+      width: 95%;
+      margin: 30px auto;
+      background: linear-gradient(135deg, #ffffff, #f5f5f5);
+      padding: 30px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      border-radius: 12px;
+      border: 3px solid;
+      border-image: linear-gradient(135deg, #00aced, #0084b4) 1;
+    }
+    h1, h2, h3 {
+      text-align: center;
+      font-weight: 700;
+      margin-bottom: 20px;
+      color: #333;
+      letter-spacing: 0.5px;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #555;
+      font-weight: 500;
+    }
+    input[type="text"],
+    input[type="time"],
+    select#meetingColor {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-sizing: border-box;
+      font-size: 16px;
+      background: #fff;
+      color: #333;
+      transition: border 0.3s ease, box-shadow 0.3s ease;
+    }
+    input[type="text"]:focus,
+    input[type="time"]:focus,
+    select#meetingColor:focus {
+      border-color: #00aced;
+      outline: none;
+      box-shadow: 0 0 10px rgba(0,172,237,0.6);
+    }
+    /* Uniform button styling for all buttons */
+    button {
+      padding: 12px 20px;
+      margin-right: 5px;
+      margin-top: 5px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      background: linear-gradient(135deg, #00aced, #0084b4);
+      color: #fff;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+      transition: background 0.3s ease, transform 0.2s ease;
+    }
+    button:hover {
+      background: linear-gradient(135deg, #0084b4, #005f7a);
+      transform: translateY(-2px);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+      background: #fff;
+      border: 3px solid;
+      border-image: linear-gradient(135deg, #00aced, #0084b4) 1;
+    }
+    table, th, td {
+      border: 1px solid #ddd;
+    }
+    th, td {
+      padding: 12px;
+      text-align: left;
+      font-size: 14px;
+      color: #333;
+    }
+    th {
+      background: #f2f2f2;
+    }
+    #timeline {
+      margin-top: 30px;
+      height: 400px;
+      background: #fff;
+      overflow: hidden;
+      border-radius: 8px;
+      border: 3px solid;
+      border-image: linear-gradient(135deg, #00aced, #0084b4) 1;
+    }
+    .data-management {
+      margin-top: 30px;
+      padding: 15px;
+      background: #f9f9f9;
+      border-radius: 8px;
+      border: 3px dashed;
+      border-image: linear-gradient(135deg, #00aced, #0084b4) 1;
+    }
+    .data-management input[type="file"] {
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Daily Meetings &amp; Free Time Timeline</h1>
+    
+    <!-- Meeting Input Form -->
+    <div class="form-group">
+      <label for="meetingName">Meeting Name:</label>
+      <input type="text" id="meetingName" placeholder="e.g., Stand-up Meeting" />
+    </div>
+    <div class="form-group">
+      <label for="meetingStart">Start Time:</label>
+      <!-- Changed from datetime-local to time -->
+      <input type="time" id="meetingStart" />
+    </div>
+    <div class="form-group">
+      <label for="meetingEnd">End Time:</label>
+      <input type="time" id="meetingEnd" />
+    </div>
+    <div class="form-group">
+      <label for="meetingColor">Meeting Color:</label>
+      <select id="meetingColor">
+        <option value="#66BB6A">Green</option>
+        <option value="#42A5F5" selected>Blue</option>
+        <option value="#EF5350">Red</option>
+        <option value="#FFEE58">Yellow</option>
+        <option value="#EC407A">Pink</option>
+        <option value="#FFA726">Orange</option>
+        <option value="#AB47BC">Purple</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <button id="addBtn" onclick="addOrUpdateMeeting()">Add Meeting</button>
+      <button id="updateBtn" onclick="addOrUpdateMeeting()" style="display:none;">Update Meeting</button>
+      <button id="cancelEditBtn" onclick="cancelEdit()" style="display:none;">Cancel Edit</button>
+    </div>
+    
+    <!-- Timeline Chart -->
+    <div id="timeline"></div>
+    
+    <!-- Meeting List -->
+    <h2>Meeting List</h2>
+    <div id="meetingList"></div>
+    
+    <!-- Data Management Section -->
+    <div class="data-management">
+      <h3>Data Management</h3>
+      <button onclick="downloadData()">Download Data</button>
+      <br/>
+      <label for="uploadInput">Upload Data:</label>
+      <input type="file" id="uploadInput" accept=".json" onchange="uploadData(event)" />
+    </div>
+  </div>
+</body>
+</html>
